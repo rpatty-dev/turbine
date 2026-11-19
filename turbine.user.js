@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Turbine
 // @namespace    https://github.com/rpatty-dev/turbine
-// @version      1.0.0
+// @version      1.0.1
 // @description  Play GTA VI over Xbox Remote Play in the browser with keyboard + mouse: GTA-style controls, car mode, low-latency stream, GPU upscaler and 30-to-60 fps frame generation.
 // @author       rpatty-dev
 // @license      MIT
@@ -174,7 +174,7 @@
 
   let hud = null;
   let statsText = "";
-  let fgState = "";
+  let fgState = "starting";
   let showStats = true;
   function renderHud() {
     if (!hud) return;
@@ -426,6 +426,8 @@
     const ro = new ResizeObserver(fit); ro.observe(video); fit();
 
     let arrival = 0, streamInterval = 1000 / 60, displayInterval = 1000 / 60, lastRaf = 0, lastT = 1;
+    let fgActive = false, fgFlipSince = 0, fgLabelAt = 0;
+    const FG_ON_RATIO = 0.7, FG_OFF_RATIO = 0.85, FG_HOLD_MS = 1000;
 
     function present(t, interp) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -457,14 +459,23 @@
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
 
       const dt = now - arrival;
-      if (arrival && dt > 4 && dt < 100) streamInterval = streamInterval * 0.9 + dt * 0.1;
+      if (arrival && dt > 4 && dt < 100) streamInterval = streamInterval * 0.95 + dt * 0.05;
       arrival = now;
 
       // Frame gen only helps when the display refreshes clearly faster than the stream.
-      const fastDisplay = displayInterval < streamInterval * 0.75;
-      const state = fastDisplay ? `on ${Math.round(1000 / streamInterval)}->${Math.round(1000 / displayInterval)}fps` : "idle (display not faster than stream)";
-      if (state !== fgState) { fgState = state; renderHud(); }
-      const doFg = frameGenOn && fastDisplay;
+      // Hysteresis + 1 s hold so stream jitter can't flip it on and off every frame.
+      const ratio = displayInterval / streamInterval;
+      const want = fgActive ? ratio < FG_OFF_RATIO : ratio < FG_ON_RATIO;
+      if (want === fgActive) fgFlipSince = 0;
+      else if (!fgFlipSince) fgFlipSince = now;
+      else if (now - fgFlipSince > FG_HOLD_MS) { fgActive = want; fgFlipSince = 0; }
+      if (now - fgLabelAt > 1000) { // refresh the label once a second, not every frame
+        fgLabelAt = now;
+        const fps = `${Math.round(1000 / streamInterval)}->${Math.round(1000 / displayInterval)}fps`;
+        const state = fgActive ? `on ${fps}` : `idle ${fps} (display not faster than stream)`;
+        if (state !== fgState) { fgState = state; renderHud(); }
+      }
+      const doFg = frameGenOn && fgActive;
       if (doFg) {
         pass(pLuma, lumas[1], [["t", frames[1]]]);
         gl.drawArrays(gl.TRIANGLES, 0, 3);
