@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Turbine
 // @namespace    https://github.com/rpatty-dev/turbine
-// @version      1.0.1
+// @version      1.1.0
 // @description  Play GTA VI over Xbox Remote Play in the browser with keyboard + mouse: GTA-style controls, car mode, low-latency stream, GPU upscaler and 30-to-60 fps frame generation.
 // @author       rpatty-dev
 // @license      MIT
@@ -15,6 +15,12 @@
 // ==/UserScript==
 (() => {
   "use strict";
+
+  // Turbine for Mac sets this: it does pointer lock, upscaling and frame generation natively.
+  const NATIVE = !!window.__TURBINE_NATIVE;
+  const toNative = (msg) => { try { window.webkit.messageHandlers.turbine.postMessage(msg); } catch (e) {} };
+  let nativeLocked = false, nativeStatus = "";
+  const isLocked = () => (NATIVE ? nativeLocked : !!document.pointerLockElement);
 
   // ===================== Settings =====================
 
@@ -113,7 +119,7 @@
 
   const nativeGetGamepads = Navigator.prototype.getGamepads;
   function getGamepads() {
-    const list = Array.from(nativeGetGamepads.call(navigator) || []);
+    const list = Array.from((nativeGetGamepads && nativeGetGamepads.call(navigator)) || []);
     if (!enabled) return list;
     let slot = list.findIndex((g) => !g);
     if (slot < 0) slot = list.length;
@@ -139,7 +145,7 @@
       if (down) return;
       enabled = !enabled;
       releaseAll();
-      if (!enabled && document.pointerLockElement) document.exitPointerLock();
+      if (!enabled && isLocked()) NATIVE ? toNative("unlock") : document.exitPointerLock();
       announce(enabled ? "gamepadconnected" : "gamepaddisconnected");
       console.log("[turbine] controller", enabled ? "ON" : "OFF");
       e.preventDefault();
@@ -180,7 +186,7 @@
     if (!hud) return;
     const lines = ["TURBINE  " + (carMode ? "CAR (W gas / S brake)" : "ON FOOT")];
     if (showStats) {
-      lines.push(`UPSCALE ${upscaleOn ? "on" : "off"}  FRAMEGEN ${frameGenOn ? (fgState || "on") : "off"}`);
+      lines.push(NATIVE ? nativeStatus : `UPSCALE ${upscaleOn ? "on" : "off"}  FRAMEGEN ${frameGenOn ? (fgState || "on") : "off"}`);
       if (statsText) lines.push(statsText);
     }
     hud.textContent = lines.join("\n");
@@ -213,9 +219,10 @@
 
   window.addEventListener("mousedown", (e) => {
     if (!enabled || !isStream(e.target)) return;
-    if (!document.pointerLockElement) {
+    if (!isLocked()) {
       // First click on the video only locks the mouse; it does not shoot.
       e.preventDefault(); e.stopImmediatePropagation();
+      if (NATIVE) { toNative("lock"); return; }
       try { e.target.requestPointerLock({ unadjustedMovement: true })?.catch?.(() => e.target.requestPointerLock()); }
       catch (err) { e.target.requestPointerLock(); }
       return;
@@ -227,8 +234,8 @@
 
   // pointerrawupdate delivers mouse movement as soon as the OS reports it (lower latency than mousemove).
   const MOVE_EVENT = "onpointerrawupdate" in window ? "pointerrawupdate" : "mousemove";
-  window.addEventListener(MOVE_EVENT, (e) => {
-    if (!enabled || !document.pointerLockElement) return;
+  function onMove(e) {
+    if (!enabled || !isLocked()) return;
     let x = e.movementX * SENSITIVITY, y = e.movementY * SENSITIVITY * (INVERT_Y ? -1 : 1);
     const len = Math.hypot(x, y);
     if (len > 0 && len < MIN_PUSH) { x *= MIN_PUSH / len; y *= MIN_PUSH / len; }
@@ -236,7 +243,13 @@
     refresh();
     clearTimeout(mouseTimer);
     mouseTimer = setTimeout(() => { mouse[0] = mouse[1] = 0; refresh(); }, MOUSE_STOP_MS);
-  }, opts);
+  }
+  window.addEventListener(MOVE_EVENT, onMove, opts);
+
+  // Native bridge (Turbine for Mac).
+  window.__turbineMove = (dx, dy) => onMove({ movementX: dx, movementY: dy });
+  window.__turbineLock = (on) => { nativeLocked = on; if (!on) releaseAll(); };
+  window.__turbineStatus = (text) => { nativeStatus = text; renderHud(); };
 
   document.addEventListener("pointerlockchange", () => { if (!document.pointerLockElement) releaseAll(); });
   window.addEventListener("blur", releaseAll);
@@ -509,7 +522,7 @@
     console.log("[turbine] renderer attached");
   }
 
-  if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
+  if (!NATIVE && "requestVideoFrameCallback" in HTMLVideoElement.prototype) {
     setInterval(() => {
       for (const v of document.querySelectorAll("video")) {
         if (v.srcObject && v.videoWidth && !v.dataset.turbine) attachRenderer(v);
